@@ -1,0 +1,15 @@
+{
+  "sites": [
+    {
+      "key": "missav",
+      "name": "MissAV",
+      "type": 3,
+      "api": "https://你的域名/missav.py",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0,
+      "changeable": 0,
+      "timeout": 30
+    }
+  ]
+}
