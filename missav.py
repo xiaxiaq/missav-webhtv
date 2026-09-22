@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-MissAV 离线版（专供 WebHomeTV / 影视+）
-完全依赖 m3u8播放链接_汇总.txt，不访问 missav.ws
-解决 Cloudflare 导致暂无数据的问题
+MissAV 离线增强版（WebHomeTV / 影视+ / PeekPili）
+- 完全不访问 missav.ws（绕过 Cloudflare）
+- 使用 m3u8播放链接_汇总.txt 作为播放数据
+- 使用 _分类索引.txt 生成丰富分类
 """
 
 import re
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 sys.path.append("..")
 try:
@@ -32,20 +33,23 @@ class Spider(BaseSpider):
             super().__init__()
         except Exception:
             pass
-        self.index = []          # 所有条目
+        self.index = []          # 全部条目
         self.by_id = {}          # vid -> item
+        self.classes = []        # 分类列表
         self.loaded = False
 
     def getName(self):
         return "MissAV"
 
     def init(self, extend=""):
-        self._load_index(extend)
+        # extend 可以是 m3u8 索引地址，也可以是 "m3u8地址|分类索引地址"
+        self._load_all(extend)
         return True
 
     def destroy(self):
         self.index = []
         self.by_id = {}
+        self.classes = []
         self.loaded = False
 
     def isVideoFormat(self, url):
@@ -55,30 +59,37 @@ class Spider(BaseSpider):
         return False
 
     def _fetch_text(self, url):
-        if not HAS_REQ:
+        if not url or not HAS_REQ:
             return ""
         try:
-            r = requests.get(url, timeout=20, verify=False, headers={
+            r = requests.get(url, timeout=25, verify=False, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
             if r.status_code == 200:
                 r.encoding = "utf-8"
                 return r.text
         except Exception as e:
-            print("[MissAV] fetch index error:", e)
+            print("[MissAV] fetch error:", e)
         return ""
 
-    def _load_index(self, path_or_url):
+    def _load_all(self, extend):
         if self.loaded:
             return
-        text = ""
-        if path_or_url and str(path_or_url).strip().startswith("http"):
-            text = self._fetch_text(str(path_or_url).strip())
+
+        m3u8_url = "https://raw.githubusercontent.com/xiaxiaq/missav-webhtv/main/m3u8播放链接_汇总.txt"
+        cate_url = "https://raw.githubusercontent.com/xiaxiaq/missav-webhtv/main/_分类索引.txt"
+
+        if extend and str(extend).strip():
+            parts = str(extend).strip().split("|")
+            if parts[0].startswith("http"):
+                m3u8_url = parts[0].strip()
+            if len(parts) > 1 and parts[1].startswith("http"):
+                cate_url = parts[1].strip()
+
+        # 1. 加载播放索引
+        text = self._fetch_text(m3u8_url)
         if not text:
-            # 默认尝试你仓库里的文件
-            text = self._fetch_text("https://raw.githubusercontent.com/xiaxiaq/missav-webhtv/main/m3u8播放链接_汇总.txt")
-        if not text:
-            print("[MissAV] index empty")
+            print("[MissAV] m3u8 index empty")
             return
 
         items = []
@@ -110,23 +121,69 @@ class Spider(BaseSpider):
             self.by_id[vid] = item
 
         self.index = items
+        print("[MissAV] loaded %d play items" % len(items))
+
+        # 2. 加载分类索引
+        cate_text = self._fetch_text(cate_url)
+        classes = [{"type_id": "all", "type_name": "全部"}]
+
+        # 优先加常用工作室
+        studio_order = [
+            "10musume", "1pondo", "caribbeancom", "caribbeancompr", "pacopacomama",
+            "tokyohot", "xxxav", "fc2", "siro", "gana", "ara", "scute", "clive",
+            "gachinco", "marriedslash", "naughty0930", "naughty4610"
+        ]
+        for s in studio_order:
+            classes.append({"type_id": s, "type_name": s})
+
+        # 再加热门类型
+        hot_types = [
+            ("中文字幕", "中文字幕"), ("無碼流出", "無碼流出"), ("最新上架", "最新上架"),
+            ("最近发布", "最近发布"), ("中出", "中出"), ("NTR", "NTR"), ("VR", "VR"),
+            ("人妻", "人妻"), ("OL", "OL"), ("乱伦", "乱伦"), ("丝袜", "丝袜"),
+            ("主观视角", "主观视角"), ("偷拍", "偷拍"), ("SM", "SM"), ("3P / 4P", "3P"),
+            ("乳交", "乳交"), ("巨乳", "巨乳"), ("美少女", "美少女"), ("熟女", "熟女"),
+            ("素人", "素人"), ("学生", "学生"), ("制服", "制服"), ("口交", "口交"),
+            ("颜射", "颜射"), ("多P", "多P"), ("调教", "调教"), ("痴女", "痴女"),
+            ("4K", "4K"), ("高清", "高清")
+        ]
+        for tid, name in hot_types:
+            classes.append({"type_id": tid, "type_name": name})
+
+        # 从分类索引再补充一些有数据的工作室/类型（避免太多）
+        if cate_text:
+            seen = set(c["type_id"] for c in classes)
+            for line in cate_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "\t" not in line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                dim, name, cnt = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                try:
+                    count = int(cnt)
+                except:
+                    count = 0
+                if count < 50:  # 太少的跳过
+                    continue
+                tid = name
+                if tid in seen or len(classes) > 80:
+                    continue
+                # 只加工作室和集合页，类型太多就不全部加了
+                if dim in ("10musume", "1pondo", "caribbeancom", "片商", "集合页") or dim in studio_order:
+                    classes.append({"type_id": tid, "type_name": name[:20]})
+                    seen.add(tid)
+
+        self.classes = classes
         self.loaded = True
-        print("[MissAV] loaded %d items" % len(items))
+        print("[MissAV] classes: %d" % len(classes))
 
     def homeContent(self, filter=False):
-        classes = [
-            {"type_id": "all", "type_name": "全部"},
-            {"type_id": "musume", "type_name": "10musume"},
-            {"type_id": "pondo", "type_name": "1pondo"},
-            {"type_id": "xxx-av", "type_name": "XXX-AV"},
-            {"type_id": "caribbean", "type_name": "Caribbean"},
-            {"type_id": "pacopacomama", "type_name": "Pacopacomama"},
-            {"type_id": "heyzo", "type_name": "Heyzo"},
-            {"type_id": "tokyo-hot", "type_name": "Tokyo Hot"},
-            {"type_id": "other", "type_name": "其他"},
-        ]
-        # 首页先返回最新 30 条
-        return {"class": classes, "list": self.index[:30]}
+        return {
+            "class": self.classes or [{"type_id": "all", "type_name": "全部"}],
+            "list": self.index[:30]
+        }
 
     def homeVideoContent(self):
         return {"list": self.index[:30]}
@@ -137,14 +194,24 @@ class Spider(BaseSpider):
         start = (page - 1) * page_size
         end = start + page_size
 
-        if tid == "all" or not tid:
+        if not tid or tid == "all":
             data = self.index
         else:
-            key = tid.lower()
-            data = [x for x in self.index if key in x["vod_id"] or key in x["vod_name"].lower()]
+            key = tid.lower().replace(" ", "").replace("/", "").replace("、", "")
+            data = []
+            for x in self.index:
+                vid = x["vod_id"]
+                name = x["vod_name"].lower()
+                if key in vid or key in name:
+                    data.append(x)
+                # 简单同义词
+                elif key in ("中出", "creampie") and ("中出" in name or "creampie" in name):
+                    data.append(x)
+                elif key in ("无码", "無碼", "uncensored") and ("uncensored" in vid or "无码" in name or "無碼" in name):
+                    data.append(x)
 
         total = len(data)
-        pagecount = (total + page_size - 1) // page_size if total else 1
+        pagecount = max(1, (total + page_size - 1) // page_size)
         return {
             "list": data[start:end],
             "page": page,
@@ -182,13 +249,13 @@ class Spider(BaseSpider):
                     "vod_pic": item["vod_pic"],
                     "vod_remarks": "本地",
                 })
-                if len(results) >= 50:
+                if len(results) >= 60:
                     break
         return {
             "list": results,
             "page": 1,
             "pagecount": 1,
-            "limit": 50,
+            "limit": 60,
             "total": len(results),
         }
 
